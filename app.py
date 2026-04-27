@@ -1,428 +1,376 @@
 """
-CipherChat — Python Flask Backend
-===================================
-Serves the index.html frontend and exposes REST API endpoints that
-simulate backend behaviour (auth tokens, geo data, attack metrics,
-sniffer stats).  Everything is still simulated — no real database,
-no real network sniffing — but the logic now lives in Python rather
-than the browser, making the architecture easy to extend.
+CipherChat v2 — Production Backend
+=====================================
+Real-time multi-user QR chat with WebSocket broadcast.
 
-Run:
+Run locally:
+    pip install -r requirements.txt
     python app.py
-Then open:
-    http://localhost:5000
+
+Production (Render / Railway / Fly.io):
+    gunicorn -k eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+
+Environment variables:
+    PORT         Server port          (default 5000)
+    SECRET_KEY   Flask secret key     (set a strong value in prod!)
+    DEBUG        "true" for dev mode  (default "false")
+    MAX_MSG      Messages kept / room (default 200)
 """
 
-import random
-import string
-import base64
-import json
-import math
-import time
+import os, random, string, base64, json, math, time, io
 from datetime import datetime, timezone
-from flask import Flask, jsonify, request, render_template, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-
-app = Flask(__name__, template_folder=".", static_folder="static")
-CORS(app)  # Allow frontend JS to call the API freely during development
+from flask_socketio import SocketIO, join_room, leave_room, emit
+import qrcode, qrcode.image.svg
 
 # ─────────────────────────────────────────────────────────────────────
-# In-memory state (resets on server restart — intentional for demo)
+# App & extensions
 # ─────────────────────────────────────────────────────────────────────
-rooms: dict[str, dict] = {}          # room_id -> room state
-sessions: dict[str, dict] = {}       # session_id -> session state
-messages: list[dict] = []            # global message log
-server_start: float = time.time()
+BASE_DIR = os.path.dirname(__file__)
+app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"))
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="eventlet",
+    ping_timeout=20,
+    ping_interval=10,
+    logger=False,
+    engineio_logger=False,
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# In-memory state
+# ─────────────────────────────────────────────────────────────────────
+rooms: dict     = {}
+sessions: dict  = {}
+all_msgs: list  = []
+server_start    = time.time()
+MAX_MSG         = int(os.environ.get("MAX_MSG", 200))
 
 # ═════════════════════════════════════════════════════════════════════
 # AUTH ENGINE
 # ═════════════════════════════════════════════════════════════════════
 
-def _b64(data: str) -> str:
-    """URL-safe base-64 encode a string (no padding)."""
-    return base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
+def _b64(s): return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+def _hex(n): return "".join(random.choices("0123456789abcdef", k=n))
 
+def make_token(uid, rid):
+    h = _b64(json.dumps({"alg":"HS256","typ":"JWT"}))
+    p = _b64(json.dumps({"sub":uid,"room":rid,"iat":int(time.time()),"exp":int(time.time())+3600,"jti":_hex(16)}))
+    return f"{h}.{p}.{_b64(_hex(32))}"
 
-def generate_jwt(user_id: str, room_id: str) -> str:
-    """Generate a fake JWT-like token (not cryptographically signed)."""
-    header  = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}))
-    payload = _b64(json.dumps({
-        "sub": user_id,
-        "room": room_id,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 3600,
-        "jti": _random_hex(16),
-    }))
-    signature = _random_hex(32)
-    return f"{header}.{payload}.{_b64(signature)}"
+def make_username():
+    adj  = ["Alpha","Cipher","Dark","Echo","Phantom","Ghost","Rogue","Null","Void","Zeta","Binary","Neon"]
+    noun = ["Net","Hax","Node","Byte","Mesh","Core","Root","Link","Port","Trace","Flux","Pulse"]
+    return random.choice(adj) + random.choice(noun) + str(random.randint(100,999))
 
+def make_sid():   return "SID-" + _hex(8).upper()
+def mask_tok(t):  return "●"*12 + t[-6:]
 
-def generate_username() -> str:
-    """Random cyber-style username."""
-    adj  = ["Alpha","Cipher","Dark","Echo","Phantom","Ghost","Rogue","Null","Void","Zeta"]
-    noun = ["Net","Hax","Node","Byte","Mesh","Core","Root","Link","Port","Trace"]
-    return random.choice(adj) + random.choice(noun) + str(random.randint(100, 999))
+# ═════════════════════════════════════════════════════════════════════
+# QR ENGINE — generates a real scannable SVG QR code
+# ═════════════════════════════════════════════════════════════════════
 
-
-def generate_session_id() -> str:
-    return "SID-" + _random_hex(4).upper()
-
-
-def mask_token(token: str) -> str:
-    return "*" * 12 + token[-6:]
-
-
-def _random_hex(n: int) -> str:
-    return "".join(random.choices(string.hexdigits[:16], k=n))
-
+def make_qr(room_id: str, base_url: str):
+    """
+    Returns (svg_string, join_url).
+    Scanning the QR with a phone camera navigates directly to the room.
+    """
+    join_url = f"{base_url.rstrip('/')}/join/{room_id}"
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=6, border=2,
+        image_factory=qrcode.image.svg.SvgPathImage,
+    )
+    qr.add_data(join_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#00e090", back_color="transparent")
+    buf = io.BytesIO()
+    img.save(buf)
+    svg = buf.getvalue().decode()
+    if svg.startswith("<?xml"):
+        svg = svg[svg.index("<svg"):]
+    return svg, join_url
 
 # ═════════════════════════════════════════════════════════════════════
 # GEO ENGINE
 # ═════════════════════════════════════════════════════════════════════
 
-GEO_LOCATIONS = [
-    {"city": "MOSCOW",     "country": "RU", "flag": "🇷🇺", "lat": 55.7558,  "lon":  37.6173},
-    {"city": "BEIJING",    "country": "CN", "flag": "🇨🇳", "lat": 39.9042,  "lon": 116.4074},
-    {"city": "PYONGYANG",  "country": "KP", "flag": "🇰🇵", "lat": 39.0392,  "lon": 125.7625},
-    {"city": "TEHRAN",     "country": "IR", "flag": "🇮🇷", "lat": 35.6892,  "lon":  51.3890},
-    {"city": "BUCHAREST",  "country": "RO", "flag": "🇷🇴", "lat": 44.4268,  "lon":  26.1025},
-    {"city": "LAGOS",      "country": "NG", "flag": "🇳🇬", "lat":  6.5244,  "lon":   3.3792},
-    {"city": "CARACAS",    "country": "VE", "flag": "🇻🇪", "lat": 10.4806,  "lon": -66.9036},
-    {"city": "MINSK",      "country": "BY", "flag": "🇧🇾", "lat": 53.9045,  "lon":  27.5615},
+GEOS = [
+    {"city":"MOSCOW",    "country":"RU","flag":"🇷🇺","lat":55.7558, "lon":37.6173},
+    {"city":"BEIJING",   "country":"CN","flag":"🇨🇳","lat":39.9042, "lon":116.4074},
+    {"city":"PYONGYANG", "country":"KP","flag":"🇰🇵","lat":39.0392, "lon":125.7625},
+    {"city":"TEHRAN",    "country":"IR","flag":"🇮🇷","lat":35.6892, "lon":51.3890},
+    {"city":"BUCHAREST", "country":"RO","flag":"🇷🇴","lat":44.4268, "lon":26.1025},
+    {"city":"LAGOS",     "country":"NG","flag":"🇳🇬","lat":6.5244,  "lon":3.3792},
+    {"city":"CARACAS",   "country":"VE","flag":"🇻🇪","lat":10.4806, "lon":-66.9036},
+    {"city":"MINSK",     "country":"BY","flag":"🇧🇾","lat":53.9045, "lon":27.5615},
+    {"city":"KABUL",     "country":"AF","flag":"🇦🇫","lat":34.5260, "lon":69.1761},
+    {"city":"HAVANA",    "country":"CU","flag":"🇨🇺","lat":23.1136, "lon":-82.3666},
 ]
-
-
-def get_random_geo() -> dict:
-    """Return a geo location with slight coordinate jitter."""
-    loc = random.choice(GEO_LOCATIONS).copy()
-    loc["lat"] = round(loc["lat"] + random.uniform(-0.5, 0.5), 4)
-    loc["lon"] = round(loc["lon"] + random.uniform(-0.5, 0.5), 4)
-    return loc
-
+def rand_geo():
+    g = random.choice(GEOS).copy()
+    g["lat"] = round(g["lat"] + random.uniform(-0.5,0.5),4)
+    g["lon"] = round(g["lon"] + random.uniform(-0.5,0.5),4)
+    return g
 
 # ═════════════════════════════════════════════════════════════════════
-# SIMULATION ENGINE helpers
+# SIMULATION ENGINE
 # ═════════════════════════════════════════════════════════════════════
 
-BOT_NAMES = [
-    "AlphaNet442","GhostByte771","NullRoot998","CipherMesh303",
-    "VoidNode556","EchoTrace211","DarkPort888","ZetaCore127",
-    "PhantomLink064","RogueHax519",
-]
+BOT_NAMES = ["AlphaNet442","GhostByte771","NullRoot998","CipherMesh303",
+             "VoidNode556","EchoTrace211","DarkPort888","ZetaCore127",
+             "PhantomLink064","RogueHax519","ShadowBit221","XorFrame007"]
 
-BOT_MESSAGES = [
-    "anyone else seeing weird packets?",
-    "sniffer is hot tonight",
-    "rotation complete, new vectors loaded",
-    "mask up, they're watching port 443",
-    "traffic spike on mesh layer 3",
-    "tunnel established, relaying now",
-    "keep it tight, exposure is climbing",
-    "who opened the UDP socket?",
-    "proxy chain holding, 7 hops",
-    "anyone got the new cipher key?",
-    "firewall bypass successful",
-    "signal clean on this end",
-    "switching to backup route now",
-    "latency spike — possible intercept",
-    "node rotation in 30s",
-    "all clear on my subnet",
-    "got flagged, switching identity",
-    "who leaked the handshake?",
-    "layer 7 inspection active, go dark",
-    "running steganography on payload",
-]
+BOT_MSGS  = ["anyone else seeing weird packets?","sniffer is hot tonight",
+             "rotation complete, new vectors loaded","mask up, they're watching port 443",
+             "traffic spike on mesh layer 3","tunnel established, relaying now",
+             "keep it tight, exposure is climbing","who opened the UDP socket?",
+             "proxy chain holding, 7 hops","anyone got the new cipher key?",
+             "firewall bypass successful","signal clean on this end",
+             "switching to backup route now","latency spike — possible intercept",
+             "node rotation in 30s","all clear on my subnet",
+             "got flagged, switching identity","who leaked the handshake?",
+             "layer 7 inspection active, go dark","running steganography on payload",
+             "null byte injection blocked upstream","honeypot triggered on node 4",
+             "new relay online — route through delta","checksum mismatch on last packet"]
 
+def intercept_chance(room):
+    return random.random() < (0.22 + (0.15 if room.get("under_attack") else 0))
 
-def should_intercept(room: dict) -> bool:
-    """Probability of interception grows with active attacks."""
-    base = 0.22
-    bonus = 0.15 if room.get("under_attack", False) else 0.0
-    return random.random() < (base + bonus)
+def security_score(room):
+    t = room.get("total_messages", 0)
+    if t == 0: return 100
+    return max(50, min(100, math.floor(100 - (room.get("intercepted_messages",0)/t)*35 - room.get("attack_attempts",0)*1.5)))
 
+def get_room(rid):
+    if rid not in rooms:
+        rooms[rid] = {
+            "id":rid, "created_at":datetime.now(timezone.utc).isoformat(),
+            "total_messages":0,"intercepted_messages":0,"blocked_packets":0,
+            "attack_attempts":0,"rps":120,"server_load":12,"latency":14,
+            "packets_per_sec":100,"under_attack":False,"attack_until":0,
+            "online_users":0,"geo":rand_geo(),"connected_sids":set(),
+        }
+    return rooms[rid]
 
-def calc_security_score(room: dict) -> int:
-    total = room.get("total_messages", 0)
-    if total == 0:
-        return 100
-    ratio = room.get("intercepted_messages", 0) / total
-    penalty = room.get("attack_attempts", 0) * 1.5
-    score = 100 - (ratio * 35) - penalty
-    return max(50, min(100, math.floor(score)))
-
-
-def simulate_ddos_tick(room: dict) -> dict:
-    """Mutate room state to simulate a DDoS tick."""
-    spike = random.random() < 0.12
-    if spike:
-        room["under_attack"]   = True
-        room["rps"]            = random.randint(3000, 11000)
-        room["server_load"]    = min(100, room.get("server_load", 20) + random.randint(15, 45))
-        room["attack_attempts"] = room.get("attack_attempts", 0) + 1
-        room["latency"]        = random.randint(80, 280)
-        room["attack_until"]   = time.time() + random.uniform(3, 7)
+def ddos_tick(room):
+    if random.random() < 0.10:
+        room.update({"under_attack":True,"rps":random.randint(3000,12000),
+                     "server_load":min(100,room["server_load"]+random.randint(15,45)),
+                     "latency":random.randint(90,300),
+                     "attack_until":time.time()+random.uniform(3,8)})
+        room["attack_attempts"] += 1
+    elif room.get("attack_until",0) < time.time():
+        room.update({"under_attack":False,"rps":random.randint(80,600),
+                     "server_load":max(12,room["server_load"]-random.randint(5,18)),
+                     "latency":random.randint(8,30)})
     else:
-        # Decay attack if timed out
-        if room.get("attack_until", 0) < time.time():
-            room["under_attack"]  = False
-            room["rps"]           = random.randint(80, 680)
-            room["server_load"]   = max(12, room.get("server_load", 20) - random.randint(5, 20))
-            room["latency"]       = random.randint(8, 30)
-        else:
-            room["rps"] = random.randint(80, 680)
-
-    room["packets_per_sec"] = int(room.get("rps", 100) * random.uniform(0.8, 1.2))
+        room["rps"] = random.randint(500,8000)
+    room["packets_per_sec"] = int(room["rps"]*random.uniform(0.8,1.2))
     return room
 
+# ═════════════════════════════════════════════════════════════════════
+# BACKGROUND BROADCAST GREENLET
+# ═════════════════════════════════════════════════════════════════════
 
-def get_or_create_room(room_id: str) -> dict:
-    if room_id not in rooms:
-        rooms[room_id] = {
-            "id": room_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "total_messages": 0,
-            "intercepted_messages": 0,
-            "blocked_packets": 0,
-            "attack_attempts": 0,
-            "rps": 120,
-            "server_load": 12,
-            "latency": 14,
-            "packets_per_sec": 100,
-            "under_attack": False,
-            "attack_until": 0,
-            "online_users": 1,
-            "geo": get_random_geo(),
-        }
-    return rooms[room_id]
+def broadcast_loop():
+    """Pushes metrics + bot messages to all active rooms every ~1.5 s."""
+    next_bot: dict = {}   # room_id -> timestamp of next bot message
+    while True:
+        socketio.sleep(1.5)
+        for rid, room in list(rooms.items()):
+            if not room.get("connected_sids"):
+                continue
 
+            ddos_tick(room)
+
+            # Geo rotation
+            if random.random() < 0.03:
+                room["geo"] = rand_geo()
+                socketio.emit("geo_update", room["geo"], room=rid)
+
+            room["online_users"]   = len(room["connected_sids"])
+            room["security_score"] = security_score(room)
+            room["exposure_pct"]   = (
+                round(room["intercepted_messages"]/room["total_messages"]*100)
+                if room["total_messages"] > 0 else 0
+            )
+
+            # Metrics push (excludes non-serialisable set)
+            socketio.emit("metrics", {k:v for k,v in room.items()
+                                      if k not in ("connected_sids","attack_until")}, room=rid)
+
+            # Rare session attack signal
+            if random.random() < 0.015:
+                socketio.emit("session_attack",
+                              {"message":"Session hijack attempt detected — rotating token"}, room=rid)
+
+            # Bot message
+            now = time.time()
+            if now >= next_bot.get(rid, 0):
+                next_bot[rid] = now + random.uniform(3,7)
+                intercepted   = intercept_chance(room)
+                msg = {"id":len(all_msgs)+1,"room_id":rid,
+                       "username":random.choice(BOT_NAMES),
+                       "content":random.choice(BOT_MSGS),
+                       "timestamp":datetime.now(timezone.utc).isoformat(),
+                       "intercepted":intercepted,"is_bot":True}
+                all_msgs.append(msg)
+                # Keep memory bounded
+                while len(all_msgs) > MAX_MSG * max(len(rooms),1):
+                    all_msgs.pop(0)
+                room["total_messages"] += 1
+                if intercepted: room["intercepted_messages"] += 1
+                socketio.emit("new_message", msg, room=rid)
 
 # ═════════════════════════════════════════════════════════════════════
-# API ROUTES
+# REST ENDPOINTS
 # ═════════════════════════════════════════════════════════════════════
 
 @app.route("/")
-def index():
-    """Serve the frontend HTML file."""
-    return render_template("index.html")
+@app.route("/join/<room_id>")
+def serve_ui(room_id=None):
+    return send_from_directory(app.static_folder, "index.html")
 
+@app.route("/api/status")
+def api_status():
+    up = int(time.time()-server_start)
+    h,r = divmod(up,3600); m,s = divmod(r,60)
+    return jsonify({"ok":True,"server":"CipherChat","version":"2.0.0",
+                    "uptime":f"{h:02d}:{m:02d}:{s:02d}",
+                    "rooms":len(rooms),"messages":len(all_msgs),
+                    "ts":datetime.now(timezone.utc).isoformat()})
 
-# ── /api/join ───────────────────────────────────────────────────────
+@app.route("/api/room/<room_id>/qr")
+def api_qr(room_id):
+    rid  = room_id.upper()
+    svg, url = make_qr(rid, request.host_url)
+    return jsonify({"ok":True,"room_id":rid,"svg":svg,"join_url":url})
+
 @app.route("/api/join", methods=["POST"])
 def api_join():
-    """
-    Join or create a room.
-    Body: { "room_id": "ROOM-ALPHA7X" }
-    Returns: username, token, session_id, masked_token
-    """
-    data    = request.get_json(force=True, silent=True) or {}
-    room_id = str(data.get("room_id", "ROOM-DEFAULT")).upper()
+    data   = request.get_json(force=True, silent=True) or {}
+    rid    = str(data.get("room_id","ROOM-DEFAULT")).upper()
+    if not rid.startswith("ROOM-"): rid = "ROOM-"+rid
+    uid    = make_username()
+    tok    = make_token(uid, rid)
+    sid    = make_sid()
+    get_room(rid)
+    sessions[sid] = {"session_id":sid,"username":uid,"token":tok,"room_id":rid,
+                     "joined_at":time.time(),"compromised":False}
+    svg, url = make_qr(rid, request.host_url)
+    return jsonify({"ok":True,"room_id":rid,"username":uid,"session_id":sid,
+                    "token":tok,"masked_token":mask_tok(tok),"qr_svg":svg,"join_url":url})
 
-    username   = generate_username()
-    token      = generate_jwt(username, room_id)
-    session_id = generate_session_id()
-    room       = get_or_create_room(room_id)
-    room["online_users"] = room.get("online_users", 0) + 1
-
-    session_data = {
-        "session_id": session_id,
-        "username":   username,
-        "token":      token,
-        "room_id":    room_id,
-        "joined_at":  time.time(),
-        "compromised": False,
-    }
-    sessions[session_id] = session_data
-
-    return jsonify({
-        "ok":           True,
-        "room_id":      room_id,
-        "username":     username,
-        "session_id":   session_id,
-        "token":        token,
-        "masked_token": mask_token(token),
-    })
-
-
-# ── /api/room/<room_id>/metrics ─────────────────────────────────────
-@app.route("/api/room/<room_id>/metrics", methods=["GET"])
-def api_metrics(room_id: str):
-    """
-    Return live simulated metrics for the room.
-    The frontend polls this every ~1–2 seconds to update the dashboard.
-    """
-    room = get_or_create_room(room_id.upper())
-    room = simulate_ddos_tick(room)
-    room["security_score"]  = calc_security_score(room)
-    room["exposure_pct"]    = (
-        round(room["intercepted_messages"] / room["total_messages"] * 100)
-        if room["total_messages"] > 0 else 0
-    )
-    # Randomly rotate geo
-    if random.random() < 0.04:
-        room["geo"] = get_random_geo()
-
-    # Randomly fluctuate online count
-    room["online_users"] = max(1, room.get("online_users", 1) + random.randint(-1, 2))
-
-    return jsonify({
-        "ok":                  True,
-        "room_id":             room_id,
-        "rps":                 room["rps"],
-        "server_load":         round(room["server_load"]),
-        "latency":             room["latency"],
-        "packets_per_sec":     room["packets_per_sec"],
-        "blocked_packets":     room["blocked_packets"],
-        "under_attack":        room["under_attack"],
-        "attack_attempts":     room["attack_attempts"],
-        "total_messages":      room["total_messages"],
-        "intercepted_messages": room["intercepted_messages"],
-        "exposure_pct":        room["exposure_pct"],
-        "security_score":      room["security_score"],
-        "online_users":        room["online_users"],
-        "geo":                 room["geo"],
-    })
-
-
-# ── /api/room/<room_id>/messages ────────────────────────────────────
 @app.route("/api/room/<room_id>/messages", methods=["GET"])
-def api_get_messages(room_id: str):
-    """Return all messages for a room (newest 100)."""
-    room_msgs = [m for m in messages if m["room_id"] == room_id.upper()]
-    return jsonify({"ok": True, "messages": room_msgs[-100:]})
-
+def api_get_msgs(room_id):
+    rid   = room_id.upper()
+    since = request.args.get("since", 0, type=int)
+    msgs  = [m for m in all_msgs if m["room_id"]==rid and m["id"]>since]
+    return jsonify({"ok":True,"messages":msgs[-100:]})
 
 @app.route("/api/room/<room_id>/messages", methods=["POST"])
-def api_post_message(room_id: str):
-    """
-    Post a user message.
-    Body: { "session_id": "SID-XXXX", "content": "hello" }
-    Returns: the saved message object (with intercepted flag).
-    """
-    data       = request.get_json(force=True, silent=True) or {}
-    session_id = data.get("session_id", "")
-    content    = str(data.get("content", "")).strip()[:200]
-
-    if not content:
-        return jsonify({"ok": False, "error": "empty message"}), 400
-
-    session = sessions.get(session_id)
-    if not session:
-        return jsonify({"ok": False, "error": "invalid session"}), 401
-
-    rid  = room_id.upper()
-    room = get_or_create_room(rid)
-    intercepted = should_intercept(room)
-
-    msg = {
-        "id":          len(messages) + 1,
-        "room_id":     rid,
-        "username":    session["username"],
-        "content":     content,
-        "timestamp":   datetime.now(timezone.utc).isoformat(),
-        "intercepted": intercepted,
-        "is_bot":      False,
-    }
-    messages.append(msg)
-    room["total_messages"]       += 1
-    if intercepted:
+def api_post_msg(room_id):
+    data  = request.get_json(force=True, silent=True) or {}
+    sid   = data.get("session_id","")
+    text  = str(data.get("content","")).strip()[:200]
+    if not text: return jsonify({"ok":False,"error":"empty"}), 400
+    sess  = sessions.get(sid)
+    if not sess: return jsonify({"ok":False,"error":"invalid session"}), 401
+    rid   = room_id.upper()
+    room  = get_room(rid)
+    hit   = intercept_chance(room)
+    msg   = {"id":len(all_msgs)+1,"room_id":rid,"username":sess["username"],
+             "content":text,"timestamp":datetime.now(timezone.utc).isoformat(),
+             "intercepted":hit,"is_bot":False}
+    all_msgs.append(msg)
+    room["total_messages"] += 1
+    if hit:
         room["intercepted_messages"] += 1
-        room["blocked_packets"]      += random.randint(1, 5)
+        room["blocked_packets"]      += random.randint(1,5)
+    socketio.emit("new_message", msg, room=rid)
+    return jsonify({"ok":True,"message":msg})
 
-    return jsonify({"ok": True, "message": msg})
+@app.route("/api/session/<session_id>/check")
+def api_session_check(session_id):
+    sess = sessions.get(session_id)
+    if not sess: return jsonify({"ok":False,"error":"unknown"}), 404
+    hit = random.random() < 0.07
+    if hit:
+        sess["token"] = make_token(sess["username"], sess["room_id"])
+        new_sid = make_sid()
+        sessions[new_sid] = sess
+        sess["session_id"] = new_sid
+    return jsonify({"ok":True,"compromised":hit,
+                    "masked_token":mask_tok(sess["token"]),
+                    "session_id":sess.get("session_id", session_id)})
 
+# ═════════════════════════════════════════════════════════════════════
+# SOCKET.IO EVENTS
+# ═════════════════════════════════════════════════════════════════════
 
-# ── /api/room/<room_id>/bot-message ─────────────────────────────────
-@app.route("/api/room/<room_id>/bot-message", methods=["POST"])
-def api_bot_message(room_id: str):
-    """
-    Generate and store a simulated bot message.
-    The frontend calls this on a timer to simulate multi-user chat.
-    """
-    rid  = room_id.upper()
-    room = get_or_create_room(rid)
-    intercepted = should_intercept(room)
+@socketio.on("join_room")
+def ws_join(data):
+    rid  = str(data.get("room_id","")).upper()
+    sid  = str(data.get("session_id",""))
+    sess = sessions.get(sid)
+    if not sess or sess["room_id"] != rid:
+        emit("error", {"message":"Invalid session"}); return
+    room = get_room(rid)
+    join_room(rid)
+    room["connected_sids"].add(request.sid)
+    room["online_users"] = len(room["connected_sids"])
+    history = [m for m in all_msgs if m["room_id"]==rid][-50:]
+    emit("room_joined", {"room_id":rid,"username":sess["username"],
+                         "history":history,"online":room["online_users"]})
+    emit("user_joined", {"username":sess["username"],"online":room["online_users"]},
+         room=rid, include_self=False)
 
-    msg = {
-        "id":          len(messages) + 1,
-        "room_id":     rid,
-        "username":    random.choice(BOT_NAMES),
-        "content":     random.choice(BOT_MESSAGES),
-        "timestamp":   datetime.now(timezone.utc).isoformat(),
-        "intercepted": intercepted,
-        "is_bot":      True,
-    }
-    messages.append(msg)
-    room["total_messages"]       += 1
-    if intercepted:
+@socketio.on("send_message")
+def ws_send(data):
+    sid  = str(data.get("session_id",""))
+    rid  = str(data.get("room_id","")).upper()
+    text = str(data.get("content","")).strip()[:200]
+    sess = sessions.get(sid)
+    if not sess or not text: return
+    room = get_room(rid)
+    hit  = intercept_chance(room)
+    msg  = {"id":len(all_msgs)+1,"room_id":rid,"username":sess["username"],
+            "content":text,"timestamp":datetime.now(timezone.utc).isoformat(),
+            "intercepted":hit,"is_bot":False}
+    all_msgs.append(msg)
+    room["total_messages"] += 1
+    if hit:
         room["intercepted_messages"] += 1
+        room["blocked_packets"]      += random.randint(1,5)
+    emit("new_message", msg, room=rid)
 
-    return jsonify({"ok": True, "message": msg})
-
-
-# ── /api/session/<session_id>/check ─────────────────────────────────
-@app.route("/api/session/<session_id>/check", methods=["GET"])
-def api_session_check(session_id: str):
-    """
-    Simulate a session security check.
-    Randomly marks the session as compromised then auto-recovers.
-    """
-    session = sessions.get(session_id)
-    if not session:
-        return jsonify({"ok": False, "error": "unknown session"}), 404
-
-    # Small chance of simulated compromise on each check
-    if random.random() < 0.07:
-        session["compromised"] = True
-        # Auto-recover: rotate token
-        session["token"]       = generate_jwt(session["username"], session["room_id"])
-        session["session_id"]  = generate_session_id()
-        sessions[session["session_id"]] = session
-        compromised = True
-    else:
-        session["compromised"] = False
-        compromised = False
-
-    return jsonify({
-        "ok":          True,
-        "compromised": compromised,
-        "masked_token": mask_token(session["token"]),
-        "session_id":  session["session_id"],
-    })
-
-
-# ── /api/geo/rotate ─────────────────────────────────────────────────
-@app.route("/api/geo/rotate", methods=["GET"])
-def api_geo_rotate():
-    """Return a fresh random attacker geolocation."""
-    return jsonify({"ok": True, "geo": get_random_geo()})
-
-
-# ── /api/status ─────────────────────────────────────────────────────
-@app.route("/api/status", methods=["GET"])
-def api_status():
-    """Server health / uptime endpoint."""
-    uptime_s = int(time.time() - server_start)
-    h, rem   = divmod(uptime_s, 3600)
-    m, s     = divmod(rem, 60)
-    return jsonify({
-        "ok":          True,
-        "server":      "CipherChat Backend",
-        "version":     "1.0.0",
-        "uptime":      f"{h:02d}:{m:02d}:{s:02d}",
-        "rooms_active": len(rooms),
-        "total_messages": len(messages),
-        "timestamp":   datetime.now(timezone.utc).isoformat(),
-    })
-
+@socketio.on("disconnect")
+def ws_disconnect():
+    for rid, room in rooms.items():
+        if request.sid in room.get("connected_sids", set()):
+            room["connected_sids"].discard(request.sid)
+            room["online_users"] = len(room["connected_sids"])
+            socketio.emit("user_left", {"online":room["online_users"]}, room=rid)
 
 # ═════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("=" * 56)
-    print("  CipherChat Backend  —  http://localhost:5000")
-    print("=" * 56)
-    # debug=True gives auto-reload during development; set to False for prod
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port  = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("DEBUG","false").lower() == "true"
+    socketio.start_background_task(broadcast_loop)
+    print("="*56)
+    print(f"  CipherChat v2  ▸  http://localhost:{port}")
+    print(f"  WebSockets : ENABLED (eventlet)")
+    print(f"  QR codes   : REAL (qrcode library)")
+    print("="*56)
+    socketio.run(app, host="0.0.0.0", port=port, debug=debug)
