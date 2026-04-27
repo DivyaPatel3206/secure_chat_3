@@ -1,0 +1,12 @@
+# CipherChat — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# Web framework
+Flask==3.0.3
+
+# Cross-Origin Resource Sharing (lets the browser JS call the API)
+Flask-Cors==4.0.1
+
+# Production WSGI server (optional — used instead of Flask dev server)
+# Uncomment the line below when deploying to a real server
+# gunicorn==22.0.0
