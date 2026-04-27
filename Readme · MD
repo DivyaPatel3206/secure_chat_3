@@ -1,0 +1,141 @@
+# CipherChat — QR-Based Chat System with Cyber Attack Simulation
+
+A dark-themed, cybersecurity-inspired chat application that simulates real-time
+packet sniffing, DDoS attacks, session hijacking, and geolocation tracking —
+all safely inside the browser and a local Python server. No real hacking,
+no real network access.
+
+---
+
+## Project Structure
+
+```
+cipherchat/
+├── app.py            ← Python Flask backend (API + serves the HTML)
+├── index.html        ← Frontend UI (HTML + CSS + JavaScript)
+├── requirements.txt  ← Python package dependencies
+└── README.md         ← This file
+```
+
+---
+
+## How It Works
+
+```
+Browser (index.html)
+       │
+       │  REST API calls (fetch)
+       ▼
+Flask backend (app.py)
+  ├── /api/join                → generates username, JWT token, session ID
+  ├── /api/room/<id>/metrics   → simulates DDoS, server load, sniffer stats
+  ├── /api/room/<id>/messages  → stores and serves chat messages
+  ├── /api/room/<id>/bot-message → generates a random bot message
+  ├── /api/session/<id>/check  → simulates session attack / token rotation
+  ├── /api/geo/rotate          → returns a random attacker geolocation
+  └── /api/status              → server health / uptime
+```
+
+All backend state is **in-memory** — it resets when you restart `app.py`.
+This is intentional for a demo/simulation project.
+
+---
+
+## Quick Start
+
+### 1. Install Python dependencies
+
+Make sure you have Python 3.9 or newer, then:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Run the server
+
+```bash
+python app.py
+```
+
+You should see:
+
+```
+========================================================
+  CipherChat Backend  —  http://localhost:5000
+========================================================
+```
+
+### 3. Open the app
+
+Visit **http://localhost:5000** in your browser.
+
+---
+
+## Usage
+
+1. The QR scanner modal opens automatically.
+2. If your browser supports camera access, point it at a QR code whose
+   content starts with `ROOM-` (e.g. `ROOM-ALPHA7X`).
+3. Or click one of the **Demo Room** pills to join instantly.
+4. Or type a room ID manually in the text box and click **JOIN**.
+
+Once inside a room:
+
+- Type a message and press **Enter** or click **SEND**.
+- Watch bot messages arrive automatically every few seconds.
+- The sidebar shows live security score, server load, sniffer stats,
+  session token status, and attacker geolocation.
+- The top bar shows real-time requests-per-second and server load.
+- Red flashes and ⚠ badges indicate intercepted messages.
+- The **SCAN NEW QR** button lets you join a different room.
+
+---
+
+## Simulated Features
+
+| Feature | Simulation method |
+|---|---|
+| QR entry | html5-qrcode CDN library reads camera |
+| JWT token | Base64-encoded fake header.payload.signature |
+| Multi-user chat | Backend generates random bot messages on request |
+| Packet sniffer | 22 % base interception probability per message |
+| DDoS attacks | 12 % chance per metrics tick; auto-recovers after 3–7 s |
+| Session hijack | 7 % chance per session check; token auto-rotates |
+| Geolocation | 8 preset "attacker" cities, random coordinate jitter |
+| Security score | Formula: 100 − (intercept_ratio × 35) − (attacks × 1.5) |
+
+---
+
+## API Reference
+
+All endpoints return JSON `{ "ok": true, ... }`.
+
+| Method | Endpoint | Body / Params | Description |
+|---|---|---|---|
+| POST | `/api/join` | `{ room_id }` | Join/create room, get token |
+| GET  | `/api/room/<id>/metrics` | — | Live dashboard metrics |
+| GET  | `/api/room/<id>/messages` | — | Last 100 messages |
+| POST | `/api/room/<id>/messages` | `{ session_id, content }` | Send a message |
+| POST | `/api/room/<id>/bot-message` | — | Generate a bot message |
+| GET  | `/api/session/<id>/check` | — | Session security check |
+| GET  | `/api/geo/rotate` | — | Random attacker geolocation |
+| GET  | `/api/status` | — | Server health / uptime |
+
+---
+
+## Requirements
+
+- Python 3.9+
+- A modern browser (Chrome, Firefox, Edge, Safari)
+- Camera permission (optional — only needed for QR scanning)
+
+---
+
+## Notes
+
+- No database is used. All data lives in Python dictionaries for the
+  lifetime of the server process.
+- No real cryptography, network sniffing, or external connections are
+  made. Everything is a safe simulation.
+- The frontend loads two CDN resources: the `html5-qrcode` library and
+  Google Fonts. Everything else is self-contained.
