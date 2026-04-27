@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CipherChat — QR Secure Comm</title>
+
+<!-- CDN Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+<style>
+/* ═══════════════════════════════════════════
+   ROOT & THEME
+═══════════════════════════════════════════ */
+:root {
+  --bg0: #040609;
+  --bg1: #080d14;
+  --bg2: #0d1520;
+  --bg3: #111d2c;
+  --bg4: #152334;
+  --panel: #0a1220;
+  --border: rgba(0,200,120,0.12);
+  --border2: rgba(0,200,120,0.25);
+  --green: #00e090;
+  --green-dim: #00804a;
+  --green-glow: rgba(0,224,144,0.18);
+  --cyan: #00c8ff;
+  --cyan-dim: #006888;
+  --red: #ff3c5a;
+  --red-dim: #7a0020;
+  --red-glow: rgba(255,60,90,0.22);
+  --amber: #ffaa00;
+  --amber-dim: #7a4f00;
+  --text: #c8e6d0;
+  --text-dim: #4a7a5a;
+  --mono: 'Share Tech Mono', monospace;
+  --sans: 'Exo 2', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg0);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scanline overlay */
+body::before {
+  content:'';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 2px,
+    rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ═══════════════════════════════════════════
+   TOP NAV BAR
+═══════════════════════════════════════════ */
+#topbar {
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border2);
+  padding: 8px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  position: relative;
+}
+#topbar::after {
+  content:'';
+  position: absolute;
+  bottom:0; left:0; right:0; height:1px;
+  background: linear-gradient(90deg, transparent, var(--green), transparent);
+  opacity: 0.4;
+}
+.logo {
+  font-family: var(--mono);
+  font-size: 18px;
+  color: var(--green);
+  letter-spacing: 3px;
+  text-shadow: 0 0 20px var(--green);
+}
+.logo span { color: var(--cyan); }
+.topbar-stats { margin-left:auto; display:flex; gap:20px; align-items:center; }
+.ts-item { display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px; }
+.ts-label { color: var(--text-dim); }
+.ts-value { color: var(--green); }
+.pulse-dot {
+  width:7px; height:7px; border-radius:50%;
+  background:var(--green); box-shadow:0 0 8px var(--green);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.pulse-dot.red   { background:var(--red);   box-shadow:0 0 8px var(--red); }
+.pulse-dot.amber { background:var(--amber); box-shadow:0 0 8px var(--amber); }
+@keyframes pulse-dot {
+  0%,100%{ opacity:1; transform:scale(1); }
+  50%    { opacity:.5; transform:scale(.7); }
+}
+
+/* ═══════════════════════════════════════════
+   MAIN LAYOUT
+═══════════════════════════════════════════ */
+#app { display:flex; flex:1; overflow:hidden; }
+
+/* ═══════════════════════════════════════════
+   SIDEBAR
+═══════════════════════════════════════════ */
+#sidebar {
+  width:240px; min-width:240px;
+  background:var(--panel);
+  border-right:1px solid var(--border);
+  display:flex; flex-direction:column;
+  overflow-y:auto; overflow-x:hidden;
+}
+.sb-section { padding:14px 16px; border-bottom:1px solid var(--border); }
+.sb-title {
+  font-family:var(--mono); font-size:9px; letter-spacing:3px;
+  color:var(--text-dim); text-transform:uppercase; margin-bottom:10px;
+}
+.sb-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.sb-key { font-size:11px; color:var(--text-dim); font-family:var(--mono); }
+.sb-val { font-family:var(--mono); font-size:11px; color:var(--green); }
+.sb-val.red   { color:var(--red); }
+.sb-val.amber { color:var(--amber); }
+.sb-val.cyan  { color:var(--cyan); }
+
+/* Score bar */
+.score-bar-bg { height:6px; background:var(--bg3); border-radius:3px; overflow:hidden; margin-top:4px; }
+.score-bar-fill {
+  height:100%; border-radius:3px; background:var(--green);
+  box-shadow:0 0 10px var(--green-glow);
+  transition: width .8s ease, background .8s ease;
+}
+
+/* Load bar */
+.load-bar-bg { height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; margin-top:6px; }
+.load-bar-fill { height:100%; border-radius:2px; background:var(--cyan); transition:width .4s ease; }
+
+/* Token */
+.token-display {
+  font-family:var(--mono); font-size:10px; color:var(--cyan);
+  background:var(--bg3); border:1px solid var(--cyan-dim);
+  border-radius:4px; padding:6px 8px; word-break:break-all;
+  margin-top:6px; letter-spacing:1px;
+}
+.token-status {
+  margin-top:6px; font-family:var(--mono); font-size:10px;
+  padding:3px 8px; border-radius:3px; display:inline-block;
+}
+.token-status.safe { color:var(--green); background:rgba(0,224,144,.08); border:1px solid var(--green-dim); }
+.token-status.compromised {
+  color:var(--red); background:rgba(255,60,90,.12); border:1px solid var(--red-dim);
+  animation:flash-border .4s ease infinite;
+}
+@keyframes flash-border {
+  0%,100%{ border-color:var(--red); } 50%{ border-color:transparent; }
+}
+
+/* Geo */
+.geo-flag { font-size:18px; line-height:1; }
+.geo-info  { font-family:var(--mono); font-size:10px; }
+.geo-info .city   { color:var(--red); }
+.geo-info .coords { color:var(--text-dim); margin-top:2px; }
+
+/* Sniffer badge */
+.sniffer-badge {
+  display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--mono); font-size:10px; padding:3px 8px; border-radius:3px;
+  background:rgba(255,60,90,.1); border:1px solid var(--red-dim); color:var(--red);
+}
+.sniffer-badge.idle { background:rgba(0,224,144,.07); border-color:var(--green-dim); color:var(--green); }
+
+/* Scan btn */
+.scan-btn {
+  margin:14px 16px; padding:10px;
+  font-family:var(--mono); font-size:11px; letter-spacing:2px; text-transform:uppercase;
+  background:transparent; color:var(--green); border:1px solid var(--green-dim);
+  border-radius:4px; cursor:pointer; width:calc(100% - 32px); transition:all .2s;
+}
+.scan-btn:hover { background:var(--green-glow); border-color:var(--green); box-shadow:0 0 16px var(--green-glow); }
+
+/* Stat mini grid */
+.stat-mini { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px; }
+.stat-mini-item { background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:8px; text-align:center; }
+.stat-mini-val { font-family:var(--mono); font-size:18px; font-weight:700; line-height:1; }
+.stat-mini-val.green { color:var(--green); }
+.stat-mini-val.red   { color:var(--red); }
+.stat-mini-val.amber { color:var(--amber); }
+.stat-mini-val.cyan  { color:var(--cyan); }
+.stat-mini-lbl { font-size:9px; color:var(--text-dim); margin-top:3px; font-family:var(--mono); letter-spacing:1px; }
+
+/* ═══════════════════════════════════════════
+   MAIN CHAT AREA
+═══════════════════════════════════════════ */
+#main { flex:1; display:flex; flex-direction:column; overflow:hidden; background:var(--bg1); }
+
+/* Metrics bar */
+#metrics-bar {
+  background:var(--bg2); border-bottom:1px solid var(--border);
+  padding:6px 16px; display:flex; gap:24px; align-items:center;
+  flex-shrink:0; font-family:var(--mono); font-size:10px;
+}
+.metric-item  { display:flex; align-items:center; gap:5px; }
+.metric-label { color:var(--text-dim); }
+.metric-value { color:var(--green); font-weight:600; }
+.metric-value.red   { color:var(--red); }
+.metric-value.amber { color:var(--amber); }
+.metric-value.cyan  { color:var(--cyan); }
+
+#main.under-attack { animation:attack-flash .5s ease; }
+@keyframes attack-flash {
+  0%,100%{ background:var(--bg1); }
+  50%    { background:rgba(255,60,90,.06); }
+}
+
+/* Chat feed */
+#chat-feed {
+  flex:1; overflow-y:auto; padding:16px;
+  display:flex; flex-direction:column; gap:8px;
+}
+#chat-feed::-webkit-scrollbar { width:4px; }
+#chat-feed::-webkit-scrollbar-thumb { background:var(--green-dim); border-radius:2px; }
+
+/* Messages */
+.msg { display:flex; gap:10px; animation:msg-in .3s ease; max-width:85%; }
+.msg.own { flex-direction:row-reverse; align-self:flex-end; }
+.msg-avatar {
+  width:30px; height:30px; border-radius:50%;
+  background:var(--bg3); border:1px solid var(--border2);
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--mono); font-size:10px; color:var(--green); flex-shrink:0;
+}
+.msg.own .msg-avatar { color:var(--cyan); border-color:var(--cyan-dim); }
+.msg-content  { flex:1; }
+.msg-meta     { display:flex; gap:8px; align-items:baseline; margin-bottom:4px; }
+.msg.own .msg-meta { flex-direction:row-reverse; }
+.msg-user     { font-family:var(--mono); font-size:11px; color:var(--green); font-weight:600; }
+.msg.own .msg-user { color:var(--cyan); }
+.msg-time     { font-family:var(--mono); font-size:9px; color:var(--text-dim); }
+.msg-bubble   {
+  background:var(--bg3); border:1px solid var(--border);
+  border-radius:2px 8px 8px 8px;
+  padding:8px 12px; font-size:13px; line-height:1.5; color:var(--text);
+}
+.msg.own .msg-bubble { border-radius:8px 2px 8px 8px; border-color:var(--cyan-dim); background:rgba(0,200,255,.06); }
+.msg.intercepted .msg-bubble {
+  border-color:var(--red); background:rgba(255,60,90,.08);
+  animation:intercepted-pulse 2s ease infinite;
+}
+@keyframes intercepted-pulse {
+  0%,100%{ box-shadow:0 0 0 0 transparent; }
+  50%    { box-shadow:0 0 10px rgba(255,60,90,.3); }
+}
+.intercept-badge {
+  display:inline-flex; align-items:center; gap:4px;
+  font-family:var(--mono); font-size:9px; color:var(--red);
+  background:rgba(255,60,90,.15); border:1px solid var(--red-dim);
+  border-radius:3px; padding:1px 5px; margin-left:6px; vertical-align:middle;
+}
+
+/* System messages */
+.sys-msg {
+  text-align:center; font-family:var(--mono); font-size:10px;
+  color:var(--text-dim); padding:4px 12px;
+  background:var(--bg3); border:1px solid var(--border);
+  border-radius:20px; align-self:center; letter-spacing:1px;
+  animation:msg-in .3s ease;
+}
+.sys-msg.alert  { color:var(--amber); border-color:var(--amber-dim); background:rgba(255,170,0,.07); }
+.sys-msg.danger { color:var(--red);   border-color:var(--red-dim);   background:rgba(255,60,90,.07); }
+
+@keyframes msg-in {
+  from{ opacity:0; transform:translateY(8px); }
+  to  { opacity:1; transform:translateY(0); }
+}
+
+/* Chat input */
+#chat-input-area {
+  padding:12px 16px; border-top:1px solid var(--border);
+  background:var(--bg2); display:flex; gap:10px; align-items:center; flex-shrink:0;
+}
+#chat-input {
+  flex:1; background:var(--bg3); border:1px solid var(--border2);
+  border-radius:4px; padding:10px 14px;
+  font-family:var(--mono); font-size:12px; color:var(--text); outline:none; transition:border-color .2s;
+}
+#chat-input:focus { border-color:var(--green); }
+#chat-input::placeholder { color:var(--text-dim); }
+#send-btn {
+  background:var(--green-dim); border:1px solid var(--green); color:var(--green);
+  font-family:var(--mono); font-size:11px; padding:10px 18px; border-radius:4px;
+  cursor:pointer; letter-spacing:2px; text-transform:uppercase; transition:all .2s;
+}
+#send-btn:hover { background:var(--green); color:var(--bg0); box-shadow:0 0 20px var(--green-glow); }
+.room-indicator {
+  font-family:var(--mono); font-size:10px; color:var(--text-dim);
+  background:var(--bg3); border:1px solid var(--border); border-radius:3px; padding:4px 8px; white-space:nowrap;
+}
+
+/* ═══════════════════════════════════════════
+   QR SCAN MODAL
+═══════════════════════════════════════════ */
+#scan-modal {
+  position:fixed; inset:0; background:rgba(4,6,9,.96);
+  display:flex; align-items:center; justify-content:center;
+  z-index:1000; flex-direction:column; gap:24px;
+}
+.modal-inner {
+  background:var(--bg2); border:1px solid var(--border2); border-radius:8px;
+  padding:32px; width:360px; text-align:center;
+  box-shadow:0 0 60px rgba(0,224,144,.08);
+}
+.modal-title { font-family:var(--mono); font-size:14px; letter-spacing:4px; color:var(--green); text-transform:uppercase; margin-bottom:6px; }
+.modal-sub   { font-size:11px; color:var(--text-dim); font-family:var(--mono); margin-bottom:24px; }
+#qr-reader   { border-radius:6px; overflow:hidden; border:1px solid var(--border2); background:#000; }
+#qr-reader video { border-radius:0!important; }
+.modal-or    { font-family:var(--mono); font-size:10px; color:var(--text-dim); letter-spacing:2px; margin:12px 0; }
+.manual-input { display:flex; gap:8px; }
+.manual-input input {
+  flex:1; background:var(--bg3); border:1px solid var(--border2); border-radius:4px;
+  padding:8px 12px; font-family:var(--mono); font-size:11px; color:var(--text); outline:none;
+}
+.manual-input input:focus { border-color:var(--green); }
+.manual-input input::placeholder { color:var(--text-dim); }
+.manual-input button {
+  background:var(--bg3); border:1px solid var(--green-dim); color:var(--green);
+  font-family:var(--mono); font-size:10px; padding:8px 12px; border-radius:4px;
+  cursor:pointer; letter-spacing:1px; transition:all .2s;
+}
+.manual-input button:hover { background:var(--green-glow); }
+.demo-qr-wrap { margin-top:12px; text-align:left; }
+.demo-qr-lbl  { font-family:var(--mono); font-size:9px; color:var(--text-dim); letter-spacing:2px; margin-bottom:6px; }
+.demo-qr-codes { display:flex; gap:10px; flex-wrap:wrap; }
+.demo-qr-pill {
+  font-family:var(--mono); font-size:10px; color:var(--cyan);
+  background:rgba(0,200,255,.07); border:1px solid var(--cyan-dim);
+  border-radius:3px; padding:4px 10px; cursor:pointer; transition:all .2s;
+}
+.demo-qr-pill:hover { background:rgba(0,200,255,.15); border-color:var(--cyan); }
+
+/* ═══════════════════════════════════════════
+   THREAT ALERT OVERLAY
+═══════════════════════════════════════════ */
+#threat-overlay {
+  position:fixed; top:60px; right:20px;
+  background:rgba(255,60,90,.12); border:1px solid var(--red);
+  border-radius:6px; padding:10px 16px; font-family:var(--mono); font-size:11px; color:var(--red);
+  opacity:0; transform:translateX(20px); transition:all .3s ease;
+  pointer-events:none; z-index:500; max-width:220px;
+}
+#threat-overlay.visible { opacity:1; transform:translateX(0); }
+
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-thumb { background:var(--green-dim); border-radius:2px; }
+</style>
+</head>
+<body>
+
+<!-- QR MODAL -->
+<div id="scan-modal">
+  <div class="modal-inner">
+    <div class="modal-title">◈ CIPHERCHAT</div>
+    <div class="modal-sub">SCAN QR CODE TO ENTER SECURE ROOM</div>
+    <div id="qr-reader" style="width:100%;min-height:220px;"></div>
+    <div class="modal-or">── OR ENTER ROOM ID MANUALLY ──</div>
+    <div class="manual-input">
+      <input type="text" id="manual-room" placeholder="ROOM-XXXXXXXX" maxlength="20">
+      <button onclick="joinRoomManual()">JOIN</button>
+    </div>
+    <div class="demo-qr-wrap">
+      <div class="demo-qr-lbl">DEMO ROOMS (CLICK TO JOIN)</div>
+      <div class="demo-qr-codes">
+        <span class="demo-qr-pill" onclick="joinRoom('ROOM-ALPHA7X')">ALPHA-7X</span>
+        <span class="demo-qr-pill" onclick="joinRoom('ROOM-BETA3K')">BETA-3K</span>
+        <span class="demo-qr-pill" onclick="joinRoom('ROOM-DELTA9Z')">DELTA-9Z</span>
+        <span class="demo-qr-pill" onclick="joinRoom('ROOM-OMEGA1F')">OMEGA-1F</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- THREAT OVERLAY -->
+<div id="threat-overlay">⚠ THREAT DETECTED</div>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div class="logo">CIPHER<span>CHAT</span></div>
+  <div class="topbar-stats">
+    <div class="ts-item">
+      <div class="pulse-dot" id="status-dot"></div>
+      <span class="ts-label">STATUS</span>
+      <span class="ts-value" id="status-text">PROTECTED</span>
+    </div>
+    <div class="ts-item"><span class="ts-label">RPS</span><span class="ts-value" id="rps-display">0</span></div>
+    <div class="ts-item"><span class="ts-label">LOAD</span><span class="ts-value" id="load-display">0%</span></div>
+    <div class="ts-item"><span class="ts-label">TIME</span><span class="ts-value" id="clock-display">00:00:00</span></div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app">
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div class="sb-section">
+      <div class="sb-title">◈ ROOM INFO</div>
+      <div class="sb-row"><span class="sb-key">ROOM ID</span><span class="sb-val cyan" id="sb-room-id">---</span></div>
+      <div class="sb-row"><span class="sb-key">USER</span><span class="sb-val" id="sb-username">---</span></div>
+      <div class="sb-row"><span class="sb-key">ONLINE</span><span class="sb-val" id="sb-online">1</span></div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-title">◈ SNIFFER ENGINE</div>
+      <div class="sniffer-badge idle" id="sniffer-badge"><span>●</span><span id="sniffer-text">IDLE</span></div>
+      <div class="stat-mini">
+        <div class="stat-mini-item"><div class="stat-mini-val green" id="stat-total">0</div><div class="stat-mini-lbl">TOTAL MSG</div></div>
+        <div class="stat-mini-item"><div class="stat-mini-val red"   id="stat-intercepted">0</div><div class="stat-mini-lbl">INTERCEPTED</div></div>
+        <div class="stat-mini-item"><div class="stat-mini-val amber" id="stat-exposure">0%</div><div class="stat-mini-lbl">EXPOSURE</div></div>
+        <div class="stat-mini-item"><div class="stat-mini-val cyan"  id="stat-packets">0</div><div class="stat-mini-lbl">PACKETS</div></div>
+      </div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-title">◈ SECURITY SCORE</div>
+      <div class="sb-row"><span class="sb-key">SCORE</span><span class="sb-val" id="score-val">100%</span></div>
+      <div class="score-bar-bg"><div class="score-bar-fill" id="score-bar" style="width:100%"></div></div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-title">◈ SERVER METRICS</div>
+      <div class="sb-row"><span class="sb-key">CPU LOAD</span><span class="sb-val" id="cpu-val">12%</span></div>
+      <div class="load-bar-bg"><div class="load-bar-fill" id="cpu-bar" style="width:12%"></div></div>
+      <div class="sb-row" style="margin-top:8px"><span class="sb-key">DDOS STATUS</span><span class="sb-val" id="ddos-status">CLEAR</span></div>
+      <div class="sb-row"><span class="sb-key">ATTACK ATTEMPTS</span><span class="sb-val red" id="attack-count">0</span></div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-title">◈ SESSION TOKEN</div>
+      <div class="token-display" id="token-display">****</div>
+      <div class="token-status safe" id="token-status">● SECURE</div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-title">◈ ATTACKER GEO</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <div class="geo-flag" id="geo-flag">🌐</div>
+        <div class="geo-info">
+          <div class="city"   id="geo-city">SCANNING...</div>
+          <div class="coords" id="geo-coords">---.---, ---.---</div>
+        </div>
+      </div>
+    </div>
+
+    <button class="scan-btn" onclick="openScanModal()">⬡ SCAN NEW QR</button>
+  </div>
+
+  <!-- CHAT -->
+  <div id="main">
+    <div id="metrics-bar">
+      <div class="metric-item"><span class="metric-label">PACKETS/S:</span><span class="metric-value" id="metric-pps">0</span></div>
+      <div class="metric-item"><span class="metric-label">BLOCKED:</span><span class="metric-value red" id="metric-blocked">0</span></div>
+      <div class="metric-item"><span class="metric-label">LATENCY:</span><span class="metric-value cyan" id="metric-latency">12ms</span></div>
+      <div class="metric-item"><span class="metric-label">ENCRYPTION:</span><span class="metric-value">AES-256-GCM</span></div>
+      <div class="metric-item"><span class="metric-label">PROTOCOL:</span><span class="metric-value cyan">WSS/TLS1.3</span></div>
+      <div class="metric-item" style="margin-left:auto;"><span class="metric-label">SNIFFER:</span><span class="metric-value red" id="metric-sniffer">SCANNING</span></div>
+    </div>
+
+    <div id="chat-feed"></div>
+
+    <div id="chat-input-area">
+      <span class="room-indicator" id="input-room-indicator">ROOM: ---</span>
+      <input type="text" id="chat-input" placeholder="SEND ENCRYPTED MESSAGE..." maxlength="200">
+      <button id="send-btn" onclick="sendUserMessage()">SEND ↑</button>
+    </div>
+  </div>
+
+</div><!-- #app -->
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   CONFIG — backend base URL
+   When running via Flask (python app.py), the API is on the same
+   origin, so an empty string works.  Change if deploying elsewhere.
+═══════════════════════════════════════════════════════════════════ */
+const API = "";  // e.g. "http://localhost:5000" if cross-origin
+
+/* ═══════════════════════════════════════════════════════════════════
+   SESSION STATE
+═══════════════════════════════════════════════════════════════════ */
+let currentRoom    = null;
+let sessionId      = null;
+let username       = null;
+let appActive      = false;
+let blockedDisplay = 0;
+let html5QrCode    = null;
+let snifferActive  = false;
+
+/* ═══════════════════════════════════════════════════════════════════
+   API HELPERS
+═══════════════════════════════════════════════════════════════════ */
+async function apiPost(path, body) {
+  try {
+    const r = await fetch(API + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    return await r.json();
+  } catch(e) {
+    console.error("API POST error:", path, e);
+    return { ok: false };
+  }
+}
+
+async function apiGet(path) {
+  try {
+    const r = await fetch(API + path);
+    return await r.json();
+  } catch(e) {
+    console.error("API GET error:", path, e);
+    return { ok: false };
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   QR SCANNER
+═══════════════════════════════════════════════════════════════════ */
+function initQrScanner() {
+  try {
+    html5QrCode = new Html5Qrcode("qr-reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 200, height: 200 } },
+      (decoded) => {
+        let roomId = decoded.startsWith("ROOM-") ? decoded : "ROOM-" + decoded.slice(0,8).toUpperCase();
+        joinRoom(roomId);
+      },
+      () => {}
+    ).catch(() => {});
+  } catch(e) {}
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   JOIN ROOM  (calls Python backend /api/join)
+═══════════════════════════════════════════════════════════════════ */
+function joinRoomManual() {
+  const val = document.getElementById("manual-room").value.trim().toUpperCase();
+  if (!val) return;
+  joinRoom(val.startsWith("ROOM-") ? val : "ROOM-" + val);
+}
+
+async function joinRoom(roomId) {
+  if (html5QrCode) html5QrCode.stop().catch(() => {});
+
+  // Call backend
+  const data = await apiPost("/api/join", { room_id: roomId });
+  if (!data.ok) {
+    addSystemMessage("Backend unreachable — check that app.py is running", "danger");
+    return;
+  }
+
+  currentRoom = data.room_id;
+  sessionId   = data.session_id;
+  username    = data.username;
+
+  document.getElementById("scan-modal").style.display       = "none";
+  document.getElementById("sb-room-id").textContent         = currentRoom;
+  document.getElementById("sb-username").textContent        = username;
+  document.getElementById("input-room-indicator").textContent = "ROOM: " + currentRoom;
+  document.getElementById("token-display").textContent      = data.masked_token;
+
+  appActive = true;
+  addSystemMessage(`${username} joined via QR — room ${currentRoom} established`, "normal");
+  addSystemMessage(`Session ${data.session_id} initialised`, "normal");
+  addSystemMessage("Secure channel open — AES-256-GCM active", "normal");
+
+  startPollingLoops();
+}
+
+function openScanModal() {
+  document.getElementById("scan-modal").style.display = "flex";
+  document.getElementById("manual-room").value = "";
+  setTimeout(initQrScanner, 300);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   POLLING LOOPS — all driven by backend API responses
+═══════════════════════════════════════════════════════════════════ */
+function startPollingLoops() {
+
+  // Clock
+  setInterval(updateClock, 1000);
+
+  // Metrics poll (1.5 s)
+  setInterval(async () => {
+    if (!appActive) return;
+    const d = await apiGet(`/api/room/${currentRoom}/metrics`);
+    if (d.ok) applyMetrics(d);
+  }, 1500);
+
+  // Bot message poll (3–6 s randomised via repeated setTimeout)
+  function scheduleBotMsg() {
+    setTimeout(async () => {
+      if (!appActive) { scheduleBotMsg(); return; }
+      const d = await apiPost(`/api/room/${currentRoom}/bot-message`, {});
+      if (d.ok) handleIncomingMessage(d.message);
+      scheduleBotMsg();
+    }, 3000 + Math.random() * 3000);
+  }
+  scheduleBotMsg();
+
+  // Session check (12–22 s)
+  function scheduleSessionCheck() {
+    setTimeout(async () => {
+      if (!appActive) { scheduleSessionCheck(); return; }
+      const d = await apiGet(`/api/session/${sessionId}/check`);
+      if (d.ok) {
+        if (d.compromised) {
+          document.getElementById("token-status").textContent = "● COMPROMISED";
+          document.getElementById("token-status").className   = "token-status compromised";
+          document.getElementById("token-display").textContent = d.masked_token;
+          showThreatOverlay("SESSION HIJACK ATTEMPT");
+          addSystemMessage("Session attack detected — token rotated", "danger");
+          sessionId = d.session_id;
+          setTimeout(() => {
+            document.getElementById("token-status").textContent = "● SECURE";
+            document.getElementById("token-status").className   = "token-status safe";
+          }, 4500);
+        }
+      }
+      scheduleSessionCheck();
+    }, 12000 + Math.random() * 10000);
+  }
+  scheduleSessionCheck();
+
+  // Sniffer visual pulse (2.5 s)
+  setInterval(() => {
+    if (!appActive) return;
+    snifferActive = !snifferActive;
+    updateSnifferBadge(snifferActive);
+    document.getElementById("metric-sniffer").textContent = snifferActive ? "ACTIVE" : "SCANNING";
+    document.getElementById("metric-sniffer").className   = "metric-value " + (snifferActive ? "red" : "amber");
+  }, 2500);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   APPLY METRICS FROM BACKEND
+═══════════════════════════════════════════════════════════════════ */
+function applyMetrics(d) {
+  // Topbar
+  document.getElementById("rps-display").textContent  = d.rps.toLocaleString();
+  document.getElementById("load-display").textContent = d.server_load + "%";
+
+  // Sidebar server
+  document.getElementById("cpu-val").textContent     = d.server_load + "%";
+  document.getElementById("cpu-bar").style.width     = d.server_load + "%";
+  document.getElementById("cpu-bar").style.background =
+    d.server_load >= 80 ? "var(--red)" : d.server_load >= 50 ? "var(--amber)" : "var(--cyan)";
+
+  document.getElementById("ddos-status").textContent  = d.under_attack ? "ACTIVE" : "CLEAR";
+  document.getElementById("ddos-status").className    = "sb-val" + (d.under_attack ? " red" : "");
+  document.getElementById("attack-count").textContent = d.attack_attempts;
+
+  // Status dot
+  const dot  = document.getElementById("status-dot");
+  const stxt = document.getElementById("status-text");
+  if (d.under_attack) {
+    dot.className  = "pulse-dot red";
+    stxt.textContent = "UNDER ATTACK";
+    stxt.style.color = "var(--red)";
+    document.getElementById("main").classList.add("under-attack");
+    setTimeout(() => document.getElementById("main").classList.remove("under-attack"), 600);
+    showThreatOverlay("DDOS SPIKE DETECTED");
+    if (Math.random() < 0.3)
+      addSystemMessage("High traffic spike — " + d.rps.toLocaleString() + " req/s detected", "alert");
+  } else {
+    dot.className  = "pulse-dot";
+    stxt.textContent = "PROTECTED";
+    stxt.style.color = "var(--green)";
+  }
+
+  // Sniffer stats
+  document.getElementById("stat-total").textContent       = d.total_messages;
+  document.getElementById("stat-intercepted").textContent = d.intercepted_messages;
+  document.getElementById("stat-exposure").textContent    = d.exposure_pct + "%";
+  document.getElementById("stat-packets").textContent     = d.packets_per_sec;
+
+  // Security score
+  const score = d.security_score;
+  document.getElementById("score-val").textContent = score + "%";
+  const bar = document.getElementById("score-bar");
+  bar.style.width      = score + "%";
+  bar.style.background = score >= 80 ? "var(--green)" : score >= 60 ? "var(--amber)" : "var(--red)";
+
+  // Metrics bar
+  blockedDisplay += Math.floor(Math.random() * 3);
+  document.getElementById("metric-pps").textContent     = d.packets_per_sec;
+  document.getElementById("metric-blocked").textContent = blockedDisplay;
+  document.getElementById("metric-latency").textContent = d.latency + "ms";
+
+  // Online users
+  document.getElementById("sb-online").textContent = d.online_users;
+
+  // Geo
+  if (d.geo) updateGeoUI(d.geo);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   HANDLE INCOMING MESSAGE (from bot or own send)
+═══════════════════════════════════════════════════════════════════ */
+function handleIncomingMessage(msg) {
+  renderMessage(msg);
+  if (msg.intercepted) {
+    snifferActive = true;
+    updateSnifferBadge(true);
+    showThreatOverlay("PACKET INTERCEPTED");
+    addSystemMessage("Sniffer activity — message flagged for interception", "alert");
+    setTimeout(() => { snifferActive = false; updateSnifferBadge(false); }, 2500);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SEND USER MESSAGE  (POST to backend)
+═══════════════════════════════════════════════════════════════════ */
+async function sendUserMessage() {
+  const input   = document.getElementById("chat-input");
+  const content = input.value.trim();
+  if (!content || !appActive) return;
+  input.value = "";
+
+  const d = await apiPost(`/api/room/${currentRoom}/messages`, {
+    session_id: sessionId,
+    content: content
+  });
+
+  if (!d.ok) { addSystemMessage("Message failed to send", "danger"); return; }
+
+  // Mark as own message for rendering
+  d.message.is_own = true;
+  renderMessage(d.message);
+
+  if (d.message.intercepted) {
+    showThreatOverlay("YOUR MESSAGE INTERCEPTED");
+    addSystemMessage("Outbound packet flagged by sniffer", "danger");
+  }
+}
+
+document.getElementById("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendUserMessage();
+});
+
+/* ═══════════════════════════════════════════════════════════════════
+   RENDER HELPERS
+═══════════════════════════════════════════════════════════════════ */
+function renderMessage(msg) {
+  const feed = document.getElementById("chat-feed");
+  const isOwn = !!msg.is_own;
+  const initials = msg.username.slice(0, 2).toUpperCase();
+  const ts = new Date(msg.timestamp);
+  const timeStr = ts.toLocaleTimeString("en-US", { hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit" });
+
+  const div = document.createElement("div");
+  div.className = "msg" + (isOwn ? " own" : "") + (msg.intercepted ? " intercepted" : "");
+  div.innerHTML = `
+    <div class="msg-avatar">${initials}</div>
+    <div class="msg-content">
+      <div class="msg-meta">
+        <span class="msg-user">${esc(msg.username)}</span>
+        <span class="msg-time">${timeStr}</span>
+        ${msg.intercepted ? '<span class="intercept-badge">⚠ INTERCEPTED</span>' : ""}
+      </div>
+      <div class="msg-bubble">${esc(msg.content)}</div>
+    </div>`;
+
+  feed.appendChild(div);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function addSystemMessage(text, type) {
+  const feed = document.getElementById("chat-feed");
+  const div  = document.createElement("div");
+  const pfx  = type === "danger" ? "⚠" : type === "alert" ? "◈" : "◦";
+  div.className = "sys-msg" + (type === "alert" ? " alert" : "") + (type === "danger" ? " danger" : "");
+  div.textContent = `${pfx} ${text}`;
+  feed.appendChild(div);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function esc(str) {
+  return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function updateSnifferBadge(active) {
+  const badge = document.getElementById("sniffer-badge");
+  const text  = document.getElementById("sniffer-text");
+  badge.className    = "sniffer-badge" + (active ? "" : " idle");
+  text.textContent   = active ? "SCANNING" : "IDLE";
+}
+
+function updateGeoUI(loc) {
+  document.getElementById("geo-flag").textContent   = loc.flag;
+  document.getElementById("geo-city").textContent   = loc.city + ", " + loc.country;
+  document.getElementById("geo-coords").textContent = loc.lat + ", " + loc.lon;
+}
+
+function showThreatOverlay(msg) {
+  const el = document.getElementById("threat-overlay");
+  el.textContent = "⚠ " + msg;
+  el.classList.add("visible");
+  setTimeout(() => el.classList.remove("visible"), 3000);
+}
+
+function updateClock() {
+  const n = new Date();
+  document.getElementById("clock-display").textContent =
+    [n.getHours(), n.getMinutes(), n.getSeconds()]
+      .map(v => String(v).padStart(2,"0")).join(":");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════════════════════ */
+updateClock();
+window.addEventListener("load", () => setTimeout(initQrScanner, 500));
+</script>
+</body>
+</html>
